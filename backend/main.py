@@ -52,3 +52,51 @@ async def lifespan(app: FastAPI):
 
 
 app = FastAPI(lifespan=lifespan)
+
+
+@app.get("/health")
+async def health():
+    """
+    Health check endpoint - test if server is running
+    Returns; JSON with status and whether index is loaded
+    """
+    return {"status": "ok", "index_loaded": index is not None}
+
+
+@app.post("/query")
+async def query(question: str):
+    """
+    RAG query endpoint - core of system
+
+    Args:
+        question: User's question as a query parameter
+                Example: /query?question=What is RAG?
+
+    Returns:
+        JSON with answer and source excerpts
+    """
+    if index is None:
+        return {"error": "Index not ready yet"}
+
+    # Step 1: Create query engine from index
+    # Handles retrieval -> ranking -> generation
+    query_engine = index.as_query_engine()
+
+    # Step 2: Query the index
+    # Behind the scenes:
+    #   1. Embeds your question
+    #   2. Finds most similar chunks in vector DB
+    #   3. Sends chunks + question to LLM
+    #   4. LLM generates answer based on retrieved context
+    response = query_engine.query(question)
+
+    # Step 3: Extract source chunks (for citations)
+    # response.source_nodes = list of chunks used to generate answer
+    sources = []
+    for node in response.source_nodes:
+        sources.append(node.text[:300])
+
+    return {
+        "answer": str(response),
+        "sources": sources,
+    }
