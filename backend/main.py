@@ -7,6 +7,7 @@ from openai import OpenAI
 from llama_index.core import SimpleDirectoryReader, VectorStoreIndex, Settings
 from llama_index.llms.openai import OpenAI
 from llama_index.embeddings.openai import OpenAIEmbedding
+from llama_index.core.node_parser import SentenceSplitter
 
 load_dotenv()
 
@@ -115,4 +116,63 @@ async def query(question: str):
         "question": question,
         "num_sources": len(sources),
         "sources": sources,
+    }
+
+
+@app.post("/test-chunks")
+async def test_chunk_sizes(question: str):
+    """
+    Test different chunk sizes on the same question.
+    Returns comparison of retrieval quality across sizes.
+    """
+    if index is None:
+        return {"error": "Index not ready"}
+
+    chunk_configs = [
+        {"size": 256, "overlap": 32, "label": "Small"},
+        {"size": 512, "overlap": 64, "label": "Medium"},
+        {"size": 1024, "overlap": 128, "label": "Large"},
+    ]
+
+    results = {}
+
+    for config in chunk_configs:
+        print(f"🔄 Testing {config['label']} chunks ({config['size']} tokens)...")
+        node_parser = SentenceSplitter(
+            chunk_size=config["size"], chunk_overlap=config["overlap"]
+        )
+
+        temp_documents = SimpleDirectoryReader("../pdfs").load_data()
+        temp_index = VectorStoreIndex.from_documents(
+            temp_documents, transformations=[node_parser]
+        )
+
+        query_engine = temp_index.as_query_engine(similarity_top_k=2)
+        response = query_engine.query(question)
+
+        scores = [node.score for node in response.source_nodes if node.score]
+        avg_score = sum(scores) / len(scores) if scores else 0
+
+        estimated_chunks = sum(
+            len(doc.text) // config["size"] + 1 for doc in temp_documents
+        )
+
+        results[config["label"]] = {
+            "chunk_size": config["size"],
+            "avg_similarity": round(avg_score, 4),
+            "estimated_chunks": estimated_chunks,
+            "retrieved_files": list(
+                set(
+                    node.metadata.get("file_name", "") for node in response.source_nodes
+                )
+            ),
+        }
+
+    best_result = max(results.items(), key=lambda x: x[1]["avg_similarity"])
+
+    return {
+        "question": question,
+        "chunk_size_comparison": results,
+        "best_config": best_result[1],
+        "recommendation": f"Use {best_result[0]} chunks ({best_result[1]['chunk_size']} tokens)",
     }
