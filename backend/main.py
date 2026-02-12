@@ -4,7 +4,6 @@ from dotenv import load_dotenv
 from fastapi import FastAPI
 from openai import OpenAI
 
-
 from llama_index.core import SimpleDirectoryReader, VectorStoreIndex, Settings
 from llama_index.llms.openai import OpenAI
 from llama_index.embeddings.openai import OpenAIEmbedding
@@ -36,9 +35,11 @@ async def lifespan(app: FastAPI):
         api_key=os.getenv("OPENAI_API_KEY"),
     )
 
-    # 2) Load documents
+    # 2) Load documents with metadata
     # SimpleDirectoryReader reads all files in a directory
-    documents = SimpleDirectoryReader("./pdfs").load_data()
+    documents = SimpleDirectoryReader(
+        "../pdfs", file_metadata=lambda filename: {"file_name": filename}
+    ).load_data()
     print(f"Loaded {len(documents)} documents into RAG index")
 
     # 3) Build vector index
@@ -78,9 +79,11 @@ async def query(question: str):
     if index is None:
         return {"error": "Index not ready yet"}
 
-    # Step 1: Create query engine from index
+    # Step 1: Create query engine with more retrieved chunk (default is 2)
     # Handles retrieval -> ranking -> generation
-    query_engine = index.as_query_engine()
+    query_engine = index.as_query_engine(
+        similarity_top_k=3  # Retrieve top 3 most relevant chunks
+    )
 
     # Step 2: Query the index
     # Behind the scenes:
@@ -90,13 +93,26 @@ async def query(question: str):
     #   4. LLM generates answer based on retrieved context
     response = query_engine.query(question)
 
-    # Step 3: Extract source chunks (for citations)
+    # Step 3: Extract enhanced sources with metadata
     # response.source_nodes = list of chunks used to generate answer
     sources = []
-    for node in response.source_nodes:
-        sources.append(node.text[:300])
+    for i, node in enumerate(response.source_nodes, 1):
+        file_name = node.metadata.get("file_name", "Unknown")
+        if "/" in file_name:
+            file_name = file_name.split("/")[-1]  # Get filename, not full path
+        sources.append(
+            {
+                "rank": i,
+                "text": node.text[:300] + "...",
+                "score": round(node.score, 4) if node.score else None,
+                "file_name": file_name,
+                "page": node.metadata.get("page_label", "N/A"),
+            }
+        )
 
     return {
         "answer": str(response),
+        "question": question,
+        "num_sources": len(sources),
         "sources": sources,
     }
