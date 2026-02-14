@@ -88,6 +88,86 @@ Answer:""")
 answer_chain = answer_prompt | answer_llm
 
 
+def create_agent_graph() -> StateGraph:
+    """Create the agent RAG graph."""
+    graph = StateGraph(AgentState)
+
+    # Router node
+    def router(state: AgentState) -> AgentState:
+        question = state["messages"][-1].content
+        decision = router_chain.invoke({"question": question})
+        needs_retrieval = "RETRIEVE" in decision.content
+
+        return {
+            "messages": state["messages"]
+            + [
+                AIMessage(
+                    content=f"Router: {'RETRIEVE' if needs_retrieval else 'DIRECT'}"
+                )
+            ],
+            "needs_retrieval": needs_retrieval,
+            "retrieved_chunks": [],
+        }
+
+    # Retrieval node
+    def retrieve(state: AgentState) -> AgentState:
+        question = state["messages"][-1].content
+        rag_result = rag_retrieve.invoke(question)
+
+        retrieved_chunks = []
+
+        return {
+            **state,
+            "messages": state["messages"]
+            + [AIMessage(content=f"RAG Tool: {rag_result}")],
+            "retrieved_chunks": retrieved_chunks,
+        }
+
+    def answer(state: AgentState) -> AgentState:
+        question = [m for m in state["messages"] if isinstance(m, HumanMessage)][
+            -1
+        ].content
+
+        # context = (
+        #     "\n".join(
+        #         [m.content for m in state["messages"][-2:] if "RAG Tool" in m.content]
+        #     )
+        #     if state["retrieved_chunks"]
+        #     else "No context available."
+        # )
+        context = ""
+        if state.get("retrieved_chunks"):
+            context = "Retrieved relevant document chunks from research papers."
+        else:
+            context = "Using general knowledge (no retrieval needed)."
+
+        answer = answer_chain.invoke({"question": question, "context": context})
+
+        return {
+            **state,
+            "messages": state["messages"]
+            + [AIMessage(content=f"Final Answer: {answer.content}")],
+        }
+
+    graph.add_node("router", router)
+    graph.add_node("retrieve", retrieve)
+    graph.add_node("answer", answer)
+
+    graph.set_entry_point("router")
+    graph.add_conditional_edges(
+        "router",
+        lambda state: "retrieve" if state["needs_retrieval"] else "answer",
+        {"retrieve": "retrieve", "answer": "answer"},
+    )
+    graph.add_edge("retrieve", "answer")
+    graph.add_edge("answer", END)
+
+    return graph.compile()
+
+
+agent_graph = None
+
+
 @asynccontextmanager
 async def lifespan(app: FastAPI):
     """
@@ -123,7 +203,12 @@ async def lifespan(app: FastAPI):
     #   - Stores them in memory for fast retrieval
     index = VectorStoreIndex.from_documents(documents)
 
+    global agent_graph
+    agent_graph = create_agent_graph()
+
+    print("Agentic RAG graph initialized")
     yield
+    print("Shutting down...")
 
 
 app = FastAPI(lifespan=lifespan)
@@ -189,6 +274,24 @@ async def query(question: str):
         "question": question,
         "num_sources": len(sources),
         "sources": sources,
+    }
+
+
+@app.post("/agent-query")
+async def agent_query(question: str):
+    """Agentic RAG with LangGraph."""
+    if agent_graph is None:
+        return {"error": "Agent not ready"}
+
+    result = agent_graph.invoke({"messages": [HumanMessage(content=question)]})
+
+    final_messages = result["messages"]
+    final_answer = final_messages[-1].content
+
+    return {
+        "question": question,
+        "agent_steps": [m.content for m in final_messages],
+        "final_answer": final_answer,
     }
 
 
