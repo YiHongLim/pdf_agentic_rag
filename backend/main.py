@@ -23,6 +23,71 @@ load_dotenv()
 index = None
 
 
+# Agent state (tracks conversation)
+class AgentState(TypedDict):
+    messages: List[Any]
+    retrieved_chunks: List[Dict]
+    needs_retrieval: bool
+
+
+# Your existing RAG as a LangGraph TOOL
+@tool
+def rag_retrieve(question: str) -> str:
+    """Retrieve relevant chunks from the RAG index."""
+    if index is None:
+        return "RAG is not ready."
+
+    query_engine = index.as_query_engine(similarity_top_k=3)
+    response = query_engine.query(question)
+
+    chunks = []
+    for node in response.source_nodes:
+        file_name = node.metadata.get("file_name", "Unknown")
+        if "/" in file_name:
+            file_name = file_name.split("/")[-1]
+        chunks.append(
+            {
+                "text": node.text[:300] + "...",
+                "file": file_name,
+                "score": node.score or 0,
+            }
+        )
+
+    return f"Retrieved {len(chunks)} chunks:\n" + "\n".join(
+        [f" {c['file']} (score: {c['score']}): {c['text']}" for c in chunks]
+    )
+
+
+# Router agent (decides if retrieval is needed)
+router_llm = ChatOpenAI(model="gpt-4o-mini")
+router_prompt = ChatPromptTemplate.from_template("""
+You are a router for an agentic RAG system.
+                                                 
+Given a question, decide if it needs document retrieval:
+                                                 
+YES if: needs specific facts, data, research findings, or document content
+NO if: general knowledge, definitions, opinions, or can be answered directly
+                                                 
+Question: {question}
+                                                 
+Respond ONLY with: "RETRIEVE" or "DIRECT"
+""")
+
+router_chain = router_prompt | router_llm
+
+# Answer agent
+answer_llm = ChatOpenAI(model="gpt-4o-mini")
+answer_prompt = ChatPromptTemplate.from_template("""
+Answer the question using the provided context if available.
+                                                 
+Question: {question}
+Context: {context}
+                                                 
+Answer:""")
+
+answer_chain = answer_prompt | answer_llm
+
+
 @asynccontextmanager
 async def lifespan(app: FastAPI):
     """
