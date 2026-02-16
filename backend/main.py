@@ -53,9 +53,7 @@ def rag_retrieve(question: str) -> str:
             }
         )
 
-    return f"Retrieved {len(chunks)} chunks:\n" + "\n".join(
-        [f" {c['file']} (score: {c['score']}): {c['text']}" for c in chunks]
-    )
+    return chunks
 
 
 # Router agent (decides if retrieval is needed)
@@ -112,15 +110,25 @@ def create_agent_graph() -> StateGraph:
     # Retrieval node
     def retrieve(state: AgentState) -> AgentState:
         question = state["messages"][-1].content
-        rag_result = rag_retrieve.invoke(question)
+        chunks = rag_retrieve.invoke(question)
 
-        retrieved_chunks = []
+        preview = (
+            "\n".join(
+                f"{c['file']} (score: {round(c['score'], 3)}): {c['text'][:150]}..."
+                for c in chunks
+            )
+            or "No chunks retrieved."
+        )
 
         return {
             **state,
             "messages": state["messages"]
-            + [AIMessage(content=f"RAG Tool: {rag_result}")],
-            "retrieved_chunks": retrieved_chunks,
+            + [
+                AIMessage(
+                    content=f"RAG Tool retrieved {len(chunks)} chunks:\n{preview}"
+                )
+            ],
+            "retrieved_chunks": chunks,
         }
 
     def answer(state: AgentState) -> AgentState:
@@ -135,11 +143,11 @@ def create_agent_graph() -> StateGraph:
         #     if state["retrieved_chunks"]
         #     else "No context available."
         # )
-        context = ""
         if state.get("retrieved_chunks"):
-            context = "Retrieved relevant document chunks from research papers."
+            top_texts = [c["text"] for c in state["retrieved_chunks"][:3]]
+            context = "\n\n".join(top_texts)
         else:
-            context = "Using general knowledge (no retrieval needed)."
+            context = "No documents were retrieved. Answer using general knowledge."
 
         answer = answer_chain.invoke({"question": question, "context": context})
 
