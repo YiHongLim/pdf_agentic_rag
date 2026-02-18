@@ -37,7 +37,7 @@ def rag_retrieve(question: str) -> str:
     if index is None:
         return "RAG is not ready."
 
-    query_engine = index.as_query_engine(similarity_top_k=3)
+    query_engine = index.as_query_engine(similarity_top_k=10)
     response = query_engine.query(question)
 
     chunks = []
@@ -62,10 +62,15 @@ router_prompt = ChatPromptTemplate.from_template("""
 You are a router for an agentic RAG system.
                                                  
 Given a question, decide if it needs document retrieval:
-                                                 
-YES if: needs specific facts, data, research findings, or document content
-NO if: general knowledge, definitions, opinions, or can be answered directly
-                                                 
+
+RETRIEVE if:
+- The question asks about a term, concept, or acronym that you do NOT confidently recognize from general knowledge, OR
+- It needs specific facts, data, research findings, or content that could be inside the documents.
+
+DIRECT if:
+- You are confident you can answer from general knowledge alone,
+- AND the question does not need any specific information from the documents.
+                                    
 Question: {question}
                                                  
 Respond ONLY with: "RETRIEVE" or "DIRECT"
@@ -204,12 +209,13 @@ async def lifespan(app: FastAPI):
     ).load_data()
     print(f"Loaded {len(documents)} documents into RAG index")
 
+    node_parser = SentenceSplitter(chunk_size=512, chunk_overlap=64)
     # 3) Build vector index
     # This:
     #   - Splits documents into chunks
     #   - Creates embeddings (vectors) for each chunk
     #   - Stores them in memory for fast retrieval
-    index = VectorStoreIndex.from_documents(documents)
+    index = VectorStoreIndex.from_documents(documents, transformations=[node_parser])
 
     global agent_graph
     agent_graph = create_agent_graph()
