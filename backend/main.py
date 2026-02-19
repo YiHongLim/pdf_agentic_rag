@@ -30,6 +30,14 @@ class AgentState(TypedDict):
     needs_retrieval: bool
 
 
+def extract_term(question: str) -> str:
+    """Very simple heuristic: use the question text without '?' as the term."""
+    q = question.strip()
+    if q.endswith("?"):
+        q = q[:-1]
+    return q.strip()
+
+
 # Your existing RAG as a LangGraph TOOL
 @tool
 def rag_retrieve(question: str) -> str:
@@ -37,7 +45,7 @@ def rag_retrieve(question: str) -> str:
     if index is None:
         return "RAG is not ready."
 
-    query_engine = index.as_query_engine(similarity_top_k=10)
+    query_engine = index.as_query_engine(similarity_top_k=15)
     response = query_engine.query(question)
 
     chunks = []
@@ -53,7 +61,22 @@ def rag_retrieve(question: str) -> str:
             }
         )
 
-    return chunks
+    term = extract_term(question)
+    term_lower = term.lower()
+
+    keyword_hits = []
+    others = []
+
+    for c in chunks:
+        if term_lower and term_lower in c["text"].lower():
+            keyword_hits.append(c)
+        else:
+            others.append(c)
+
+    ordered = keyword_hits + others
+    top_chunks = ordered[:10]
+
+    return top_chunks
 
 
 # Router agent (decides if retrieval is needed)
@@ -141,25 +164,37 @@ def create_agent_graph() -> StateGraph:
             -1
         ].content
 
-        # context = (
-        #     "\n".join(
-        #         [m.content for m in state["messages"][-2:] if "RAG Tool" in m.content]
-        #     )
-        #     if state["retrieved_chunks"]
-        #     else "No context available."
-        # )
-        if state.get("retrieved_chunks"):
-            top_texts = [c["text"] for c in state["retrieved_chunks"][:3]]
+        retrieved = state.get("retrieved_chunks", [])
+
+        if retrieved:
+            top_texts = [c["text"] for c in retrieved[:3]]
             context = "\n\n".join(top_texts)
+
+            if "page" in retrieved[0]:
+                source_info = ", ".join(
+                    {f"{c['file']} (p. {c['page']})" for c in retrieved[:3]}
+                )
+
+            else:
+                source_info = ", ".join({c["file"] for c in retrieved[:3]})
+            source_suffix = f"\n\nSources: {source_info}"
         else:
             context = "No documents were retrieved. Answer using general knowledge."
+            source_suffix = ""
+
+        # if state.get("retrieved_chunks"):
+        #     top_texts = [c["text"] for c in state["retrieved_chunks"][:3]]
+        #     context = "\n\n".join(top_texts)
+        # else:
+        #     context = "No documents were retrieved. Answer using general knowledge."
 
         answer = answer_chain.invoke({"question": question, "context": context})
 
+        final_text = f"Final Answer: {answer.content}{source_suffix}"
+
         return {
             **state,
-            "messages": state["messages"]
-            + [AIMessage(content=f"Final Answer: {answer.content}")],
+            "messages": state["messages"] + [AIMessage(content=final_text)],
         }
 
     graph.add_node("router", router)
