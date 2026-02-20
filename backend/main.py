@@ -3,13 +3,14 @@ import os
 from dotenv import load_dotenv
 from fastapi import FastAPI
 from openai import OpenAI
+from pydantic import BaseModel
 
 from llama_index.core import SimpleDirectoryReader, VectorStoreIndex, Settings
 from llama_index.llms.openai import OpenAI
 from llama_index.embeddings.openai import OpenAIEmbedding
 from llama_index.core.node_parser import SentenceSplitter
 
-from typing import Dict, Any, List, TypedDict
+from typing import Dict, Any, List, Literal, TypedDict
 from langgraph.graph import StateGraph, END
 from langgraph.prebuilt import ToolNode
 from langchain_openai import ChatOpenAI
@@ -118,6 +119,47 @@ def create_agent_graph() -> StateGraph:
     """Create the agent RAG graph."""
     graph = StateGraph(AgentState)
 
+    class GradeDoc(BaseModel):
+        relevance: Literal["yes", "no"]
+        reason: str
+
+    grader_llm = ChatOpenAI(model="gpt-4o-mini", temperature=0)
+
+    def grade(state: AgentState) -> AgentState:
+        question = [m for m in state["messages"] if isinstance(m, HumanMessage)][
+            -1
+        ].content
+        filtered = []
+        log_lines = []
+
+        for c in state.get("retrieved_chunks", []):
+            prompt = f"""You are grading whether a document chunk helps answer a question.
+
+            Question: {question}
+
+            Chunk:
+            {c["text"]}
+
+            Answer only "yes" if this chunk contains information that directly helps answer the question. Otherwise, answer "no".
+            Explain briefly why in 1 sentence."""
+            raw = grader_llm.invoke([HumanMessage(content=prompt)])
+            text = raw.content.lower()
+            relevance = "yes" if "yes" in text.splitlines()[0] else "no"
+
+            if relevance == "yes":
+                filtered.append(c)
+            log_lines.append(f"{c['file']}: {relevance} - {raw.content[:120]}")
+
+        msg = "Grader: kept {} of {} chunks.\n{}".format(
+            len(filtered), len(state.get("retrieved_chunks", [])), "\n".join(log_lines)
+        )
+
+        return {
+            **state,
+            "retrieved_chunks": filtered,
+            "messages": state["messages"] + [AIMessage(content=msg)],
+        }
+
     # Router node
     def router(state: AgentState) -> AgentState:
         question = state["messages"][-1].content
@@ -137,7 +179,9 @@ def create_agent_graph() -> StateGraph:
 
     # Retrieval node
     def retrieve(state: AgentState) -> AgentState:
-        question = state["messages"][-1].content
+        question = [m for m in state["messages"] if isinstance(m, HumanMessage)][
+            -1
+        ].content
         chunks = rag_retrieve.invoke(question)
 
         preview = (
@@ -174,7 +218,6 @@ def create_agent_graph() -> StateGraph:
                 source_info = ", ".join(
                     {f"{c['file']} (p. {c['page']})" for c in retrieved[:3]}
                 )
-
             else:
                 source_info = ", ".join({c["file"] for c in retrieved[:3]})
             source_suffix = f"\n\nSources: {source_info}"
@@ -199,6 +242,7 @@ def create_agent_graph() -> StateGraph:
 
     graph.add_node("router", router)
     graph.add_node("retrieve", retrieve)
+    graph.add_node("grade", grade)
     graph.add_node("answer", answer)
 
     graph.set_entry_point("router")
@@ -207,7 +251,8 @@ def create_agent_graph() -> StateGraph:
         lambda state: "retrieve" if state["needs_retrieval"] else "answer",
         {"retrieve": "retrieve", "answer": "answer"},
     )
-    graph.add_edge("retrieve", "answer")
+    graph.add_edge("retrieve", "grade")
+    graph.add_edge("grade", "answer")
     graph.add_edge("answer", END)
 
     return graph.compile()
