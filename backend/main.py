@@ -140,8 +140,16 @@ def create_agent_graph() -> StateGraph:
             Chunk:
             {c["text"]}
 
-            Answer only "yes" if this chunk contains information that directly helps answer the question. Otherwise, answer "no".
-            Explain briefly why in 1 sentence."""
+            Decide if this chunk is useful to answer the question.
+            Answer "yes" if the chunk:
+            - defines the term,
+            - describes its purpose, behavior, components, or results,
+            - or gives examples or evidence about it.
+
+            Answer "no" only if the chunk is clearly unrelated.
+
+            First line: just "yes" or "no".
+            Second line: brief reason (1 sentence)."""
             raw = grader_llm.invoke([HumanMessage(content=prompt)])
             text = raw.content.lower()
             relevance = "yes" if "yes" in text.splitlines()[0] else "no"
@@ -221,24 +229,25 @@ def create_agent_graph() -> StateGraph:
             else:
                 source_info = ", ".join({c["file"] for c in retrieved[:3]})
             source_suffix = f"\n\nSources: {source_info}"
+
+            answer_msg = answer_chain.invoke({"question": question, "context": context})
+            final_text = f"Final Answer: {answer_msg.content}{source_suffix}"
+
+            return {
+                **state,
+                "messages": state["messages"] + [AIMessage(content=final_text)],
+            }
         else:
-            context = "No documents were retrieved. Answer using general knowledge."
-            source_suffix = ""
+            answer_text = (
+                "I don't know from these docs. The retrieved documents do not "
+                "contain enough information to answer this question reliably"
+            )
+            final_text = f"Final Answer: {answer_text}"
 
-        # if state.get("retrieved_chunks"):
-        #     top_texts = [c["text"] for c in state["retrieved_chunks"][:3]]
-        #     context = "\n\n".join(top_texts)
-        # else:
-        #     context = "No documents were retrieved. Answer using general knowledge."
-
-        answer = answer_chain.invoke({"question": question, "context": context})
-
-        final_text = f"Final Answer: {answer.content}{source_suffix}"
-
-        return {
-            **state,
-            "messages": state["messages"] + [AIMessage(content=final_text)],
-        }
+            return {
+                **state,
+                "messages": state["messages"] + [AIMessage(content=final_text)],
+            }
 
     graph.add_node("router", router)
     graph.add_node("retrieve", retrieve)
