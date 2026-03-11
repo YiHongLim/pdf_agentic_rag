@@ -29,6 +29,7 @@ class AgentState(TypedDict):
     messages: List[Any]
     retrieved_chunks: List[Dict]
     needs_retrieval: bool
+    retry_count: int
 
 
 def extract_term(question: str) -> str:
@@ -140,7 +141,7 @@ def create_agent_graph() -> StateGraph:
             Chunk:
             {c["text"]}
 
-            Decide if this chunk is useful to answer the question.
+a            Decide if this chunk is useful to answer the question.
             Answer "yes" if the chunk:
             - defines the term,
             - describes its purpose, behavior, components, or results,
@@ -166,6 +167,39 @@ def create_agent_graph() -> StateGraph:
             **state,
             "retrieved_chunks": filtered,
             "messages": state["messages"] + [AIMessage(content=msg)],
+        }
+
+    # Rewrite node
+    rewrite_llm = ChatOpenAI(model="gpt-4o-mini", temperature=0)
+    rewrite_prompt = ChatPromptTemplate.from_template("""
+        You are a query rewriter for a retrieval system.
+        Original question:
+        {question}
+                                                      
+        Your task:
+        - Rewrite this as concise, clear search query that will work well over research PDFs.
+        - Preserve the original meaning.
+        - Remove quotation marks and unnecessary words.
+        
+        Return only the rewriteen query.                                                   
+    """)
+
+    rewrite_chain = rewrite_prompt | rewrite_llm
+
+    def rewrite_query(state: AgentState) -> AgentState:
+        # last human message = original question
+        original_q = [m for m in state["messages"] if isinstance(m, HumanMessage)][
+            -1
+        ].content
+        rewritten = rewrite_chain.invoke({"question": original_q}).content.strip()
+
+        msg = AIMessage(content=f"Rewritten query: {rewritten}")
+
+        return {
+            **state,
+            "messages": state["messages"] + [msg],
+            "retry_count": state.get("retry_count", 0) + 1,
+            "retrieved_chunks": [],
         }
 
     # Router node
@@ -253,6 +287,7 @@ def create_agent_graph() -> StateGraph:
     graph.add_node("retrieve", retrieve)
     graph.add_node("grade", grade)
     graph.add_node("answer", answer)
+    graph.add_node("rewrite_query", rewrite_query)
 
     graph.set_entry_point("router")
     graph.add_conditional_edges(
@@ -386,7 +421,9 @@ async def agent_query(question: str):
     if agent_graph is None:
         return {"error": "Agent not ready"}
 
-    result = agent_graph.invoke({"messages": [HumanMessage(content=question)]})
+    result = agent_graph.invoke(
+        {"messages": [HumanMessage(content=question)], "retry_count": 0}
+    )
 
     final_messages = result["messages"]
     final_answer = final_messages[-1].content
