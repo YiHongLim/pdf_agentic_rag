@@ -141,7 +141,7 @@ def create_agent_graph() -> StateGraph:
             Chunk:
             {c["text"]}
 
-a            Decide if this chunk is useful to answer the question.
+            Decide if this chunk is useful to answer the question.
             Answer "yes" if the chunk:
             - defines the term,
             - describes its purpose, behavior, components, or results,
@@ -181,7 +181,7 @@ a            Decide if this chunk is useful to answer the question.
         - Preserve the original meaning.
         - Remove quotation marks and unnecessary words.
         
-        Return only the rewriteen query.                                                   
+        Return only the rewriten query.                                                   
     """)
 
     rewrite_chain = rewrite_prompt | rewrite_llm
@@ -283,6 +283,18 @@ a            Decide if this chunk is useful to answer the question.
                 "messages": state["messages"] + [AIMessage(content=final_text)],
             }
 
+    MAX_RETRIES = 2
+
+    def route_after_grading(state: AgentState) -> str:
+        if state.get("retrieved_chunks"):
+            return "answer"
+
+        retries = state.get("retry_count", 0)
+        if retries < MAX_RETRIES:
+            return "rewrite_query"
+        else:
+            return "answer"
+
     graph.add_node("router", router)
     graph.add_node("retrieve", retrieve)
     graph.add_node("grade", grade)
@@ -295,6 +307,12 @@ a            Decide if this chunk is useful to answer the question.
         lambda state: "retrieve" if state["needs_retrieval"] else "answer",
         {"retrieve": "retrieve", "answer": "answer"},
     )
+    graph.add_conditional_edges(
+        "grade",
+        route_after_grading,
+        {"rewrite_query": "rewrite_query", "answer": "answer"},
+    )
+    graph.add_edge("rewrite_query", "retrieve")
     graph.add_edge("retrieve", "grade")
     graph.add_edge("grade", "answer")
     graph.add_edge("answer", END)
