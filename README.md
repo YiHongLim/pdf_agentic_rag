@@ -1,4 +1,4 @@
-# PDF Agentic RAG Service
+# PDF Agentic RAG 
 
 A FastAPI service that answers questions over a local corpus of PDFs using:
 
